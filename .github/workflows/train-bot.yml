@@ -1,0 +1,58 @@
+name: Bumpball Bot Self-Play Trainer
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Training budget in minutes (max ~300 for GitHub Actions)"
+        required: false
+        default: "280"
+      matches:
+        description: "Symmetric match pairs per generation"
+        required: false
+        default: "6"
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Checkout trainer repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned Lune 0.11.1
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o /tmp/lune.zip \
+            "https://github.com/lune-org/lune/releases/download/v0.11.1/lune-0.11.1-linux-x86_64.zip"
+          unzip -o /tmp/lune.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/lune"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/lune" --version
+
+      - name: Run headless self-play trainer
+        run: |
+          MINUTES="${{ github.event.inputs.minutes || '280' }}"
+          MATCHES="${{ github.event.inputs.matches || '6' }}"
+          lune run scripts/train-bot.luau -- \
+            --minutes "$MINUTES" \
+            --matches "$MATCHES" \
+            --checkpoint checkpoint.json \
+            --out src/server/BotWeights.luau
+
+      - name: Commit and push updated BotWeights & checkpoint
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/server/BotWeights.luau checkpoint.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Train BotWeights (auto-checkpoint) [skip ci]"
+            git push
+          else
+            echo "No weight improvements to commit this run."
+          fi
