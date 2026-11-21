@@ -68,7 +68,7 @@ end
 local function flatUnit(vec)
 	local flat = Vector3.new(vec.X, 0, vec.Z)
 	local mag = flat.Magnitude
-	if mag < 1e-4 then
+	if mag ~= mag or mag < 1e-4 then
 		return nil, 0
 	end
 	return flat / mag, mag
@@ -534,17 +534,20 @@ local function buildCandidates(round, team, roles, baseMoves, weights)
 	end
 
 	local ballNearOwnGoal = (ballPos.X - ownX) * atkSign < 5.2
+	local ballNearTgtGoal = (tgtX - ballPos.X) * atkSign < 3.5
+	-- Aim slightly past the goal line so ghostBallDirection never degenerates when the ball sits on the line.
+	local aimGoalX = tgtX + atkSign * 1.8
 
 	-- 1. Direct ghost-ball shots at center, left post, right post across power levels.
 	local goalTargets = {
-		Vector3.new(tgtX, 0, 0),
-		Vector3.new(tgtX, 0, 2.2),
-		Vector3.new(tgtX, 0, -2.2),
+		Vector3.new(aimGoalX, 0, 0),
+		Vector3.new(aimGoalX, 0, 2.2),
+		Vector3.new(aimGoalX, 0, -2.2),
 	}
 	local shotPowers = { 1.0, 0.85, 0.65 }
 	for _, target in ipairs(goalTargets) do
 		local aimDir, align = ghostBallDirection(striker.position, ballPos, target, sr, br)
-		if aimDir and align > 0.15 then
+		if aimDir and align > (if ballNearTgtGoal then -0.1 else 0.15) then
 			-- Guard against hitting backward when ball is near our own goal.
 			local towardOwn = aimDir.X * (-atkSign)
 			if not (ballNearOwnGoal and towardOwn > 0.25) then
@@ -552,6 +555,14 @@ local function buildCandidates(round, team, roles, baseMoves, weights)
 					addCandidate({ [striker.id] = { id = striker.id, direction = aimDir, power = pwr } }, "direct")
 				end
 			end
+		end
+	end
+
+	-- 1b. Goal-line tap-in fallback when ball is right on the opponent's goal line.
+	if ballNearTgtGoal then
+		local tapDir = flatUnit(ballPos - striker.position)
+		if tapDir and tapDir.X * atkSign > 0.1 then
+			addCandidate({ [striker.id] = { id = striker.id, direction = tapDir, power = 0.85 } }, "tapIn")
 		end
 	end
 
@@ -616,18 +627,18 @@ local function buildCandidates(round, team, roles, baseMoves, weights)
 		end
 	end
 
-	-- 7. Pure base-role defensive fallback (striker holds position) + safe empty fallback.
-	addCandidate({}, "hold")
-	table.insert(candidates, { moves = {}, tag = "safeHold" })
+	-- 7. Pure base-role defensive fallback (only when baseMoves is non-empty; never submit an empty "give up" plan).
+	if next(baseMoves) ~= nil then
+		addCandidate({}, "hold")
+	end
 
 	-- Cap to weights.simCandidates while always keeping at least one safe clearance/reposition candidate.
 	local limit = math.max(4, math.floor(weights.simCandidates or 12))
 	if #candidates > limit then
 		local trimmed = {}
-		for i = 1, limit - 2 do
+		for i = 1, limit - 1 do
 			trimmed[i] = candidates[i]
 		end
-		trimmed[limit - 1] = candidates[#candidates - 1]
 		trimmed[limit] = candidates[#candidates]
 		candidates = trimmed
 	end
@@ -978,6 +989,43 @@ function BotBrain.planTurn(round, team, turnId, difficulty, customWeights)
 					power = math.clamp(mv.power, 0.05, 1.0),
 				})
 			end
+		end
+	end
+
+	-- Safety net: never return an empty move list (e.g. when ball is on either goal line).
+	if #denseMoves == 0 then
+		local fallbackAth = roles.striker or roles.keeper or scratch.athletes[firstId]
+		if fallbackAth then
+			local ballPos = scratch.ball.position
+			local atkSign = roles.atkSign
+			local ballNearOwn = (ballPos.X - roles.ownGoal.X) * atkSign < 5.2
+			local fallbackDir = nil
+			local fallbackPower = 0.85
+			if ballNearOwn then
+				-- If behind ball, clear diagonally away from own goal; otherwise sidestep/reposition safely.
+				if (ballPos.X - fallbackAth.position.X) * atkSign > 0.15 then
+					local clearZ = if ballPos.Z >= 0 then 6.5 else -6.5
+					fallbackDir = flatUnit(Vector3.new(ballPos.X + atkSign * 7.5, 0, clearZ) - fallbackAth.position)
+				else
+					local safeSpot = Vector3.new(
+						math.clamp(ballPos.X - atkSign * 2.4, -11.2, 11.2),
+						0,
+						if ballPos.Z >= 0 then -2.6 else 2.6
+					)
+					fallbackDir = flatUnit(safeSpot - fallbackAth.position)
+					fallbackPower = 0.72
+				end
+			else
+				fallbackDir = flatUnit(ballPos - fallbackAth.position)
+			end
+			if not fallbackDir then
+				fallbackDir = Vector3.new(atkSign, 0, 0)
+			end
+			table.insert(denseMoves, {
+				id = fallbackAth.id,
+				direction = fallbackDir,
+				power = fallbackPower,
+			})
 		end
 	end
 
