@@ -85,7 +85,7 @@ function Powers.isLegal(placement, arena)
 	local x, z = placement.x, placement.z
 	local margin = Powers.Radius + Powers.Buffer
 	if math.abs(x) > placementHalfX or math.abs(z) > placementHalfZ then
-		return false, "Outside the placement area"
+		return false, "Place inside the pitch"
 	end
 	local function overlapsBody(body)
 		return within(x, z, body.position.X, body.position.Z, margin + body.cfg.radius)
@@ -96,7 +96,7 @@ function Powers.isLegal(placement, arena)
 	end
 	for _, trigger in ipairs(arena.triggers) do
 		if trigger.kind == "crate" and within(x, z, trigger.center.X, trigger.center.Z, 2 * Powers.Radius + Powers.Buffer) then
-			return false, "Too close to a crate spot"
+			return false, "Too close to a power crate"
 		end
 	end
 	for _, other in ipairs(arena.activePowers) do

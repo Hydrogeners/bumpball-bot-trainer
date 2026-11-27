@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       minutes:
-        description: "Training budget in minutes (max ~300 for GitHub Actions)"
+        description: "Training budget in minutes (max ~330 for GitHub Actions)"
         required: false
-        default: "280"
+        default: "310"
       matches:
         description: "Symmetric match pairs per generation"
         required: false
@@ -20,7 +20,7 @@ permissions:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     steps:
       - name: Checkout trainer repository
         uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
 
       - name: Run headless self-play trainer
         run: |
-          MINUTES="${{ github.event.inputs.minutes || '280' }}"
+          MINUTES="${{ github.event.inputs.minutes || '310' }}"
           MATCHES="${{ github.event.inputs.matches || '6' }}"
           lune run scripts/train-bot.luau -- \
             --minutes "$MINUTES" \

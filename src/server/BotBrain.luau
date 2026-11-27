@@ -160,18 +160,18 @@ end
 -- ===========================================================================
 
 local ATTACKING_WEIGHTS = {
-	Easy = { forward = 0.45, option = 0.30, slant = 0.25 },
-	Normal = { forward = 0.45, option = 0.38, slant = 0.17 },
-	Pro = { forward = 0.42, option = 0.44, slant = 0.14 },
+	Easy = { forward = 0.34, option = 0.33, slant = 0.33 },
+	Normal = { forward = 0.34, option = 0.34, slant = 0.32 },
+	Pro = { forward = 0.34, option = 0.34, slant = 0.32 },
 }
 
 local DEFENDING_WEIGHTS = {
-	Easy = { zone = 0.40, box = 0.30, rush = 0.30 },
-	Normal = { zone = 0.48, box = 0.34, rush = 0.18 },
-	Pro = { zone = 0.50, box = 0.36, rush = 0.14 },
+	Easy = { zone = 0.34, box = 0.33, rush = 0.33 },
+	Normal = { zone = 0.34, box = 0.34, rush = 0.32 },
+	Pro = { zone = 0.34, box = 0.34, rush = 0.32 },
 }
 
-function BotBrain.chooseFormation(team, attackingTeam, difficulty, rng)
+function BotBrain.chooseFormation(team, attackingTeam, difficulty, rng, avoidFormation)
 	local options = Formations.options(team, attackingTeam)
 	if not options or #options == 0 then
 		return "forward"
@@ -179,19 +179,31 @@ function BotBrain.chooseFormation(team, attackingTeam, difficulty, rng)
 	local tier = if type(difficulty) == "string" and ATTACKING_WEIGHTS[difficulty] then difficulty else "Normal"
 	local tableWeights = if team == attackingTeam then ATTACKING_WEIGHTS[tier] else DEFENDING_WEIGHTS[tier]
 
-	local total = 0
+	-- Filter out the previous kickoff formation when multiple options exist so the AI never spams one kickoff
+	local pool = {}
 	for _, id in ipairs(options) do
-		total += tableWeights[id] or 0.2
+		if id ~= avoidFormation then
+			table.insert(pool, id)
+		end
 	end
-	local roll = sampleRng(rng, (team + 1) * 97 + (attackingTeam + 1) * 31) * total
+	if #pool == 0 then
+		pool = options
+	end
+
+	local total = 0
+	for _, id in ipairs(pool) do
+		total += tableWeights[id] or 0.33
+	end
+	local u = if rng ~= nil then sampleRng(rng, (team + 1) * 97 + (attackingTeam + 1) * 31) else math.random()
+	local roll = u * total
 	local accum = 0
-	for _, id in ipairs(options) do
-		accum += tableWeights[id] or 0.2
+	for _, id in ipairs(pool) do
+		accum += tableWeights[id] or 0.33
 		if roll <= accum then
 			return id
 		end
 	end
-	return options[1]
+	return pool[1]
 end
 
 -- ===========================================================================
@@ -409,6 +421,15 @@ local function buildBaseRoleMoves(round, team, roles)
 				laneZ = -laneZ
 			end
 			local laneX = math.clamp(ballPos.X + atkSign * 3.8, -10.5, 10.5)
+			-- Avoid crossing straight through the striker's approach lane to the ball
+			local striker = roles.striker
+			if striker then
+				local midX = (striker.position.X + ballPos.X) * 0.5
+				local midZ = (striker.position.Z + ballPos.Z) * 0.5
+				if math.abs(laneX - midX) < 1.6 and math.abs(laneZ - midZ) < 1.6 then
+					laneZ = if laneZ >= 0 then math.min(6.4, laneZ + 2.2) else math.max(-6.4, laneZ - 2.2)
+				end
+			end
 			move = makeMoveToPoint(sup, Vector3.new(laneX, 0, laneZ), 0.65, 0.0, 0.82)
 		end
 		if move then
@@ -917,36 +938,23 @@ end
 -- Main Entry Point: BotBrain.planTurn
 -- ===========================================================================
 
-function BotBrain.planTurn(round, team, turnId, difficulty, customWeights)
-	local weights = customWeights or BotWeights.get(difficulty)
-	turnId = turnId or 1
-
-	-- Layer 4: Decide power play first so tactical planning coordinates with it.
-	local chosenPower = BotBrain.choosePower(round, team, weights)
-
-	-- If power flips goals or teleports ball, evaluate on a virtual view that reflects it.
-	local scratch = getScratchRound()
-	cloneIntoScratch(round, scratch, chosenPower)
-
-	-- Layer 2: Assign 4-bobble roles on the effective board state.
+local function evaluateCandidatePlan(round, scratch, team, turnId, weights, candidatePower)
+	cloneIntoScratch(round, scratch, candidatePower)
 	local roles = assignRoles(scratch, team, turnId, weights)
 	local baseMoves = buildBaseRoleMoves(scratch, team, roles)
-
-	-- Opponent 1-step threat prediction.
 	local oppThreat, oppThreatDir = findOpponentThreatStriker(scratch, 1 - team)
 	local oppMove = if oppThreat and oppThreatDir
 		then { id = oppThreat.id, direction = oppThreatDir, power = 0.9 }
 		else nil
 
-	-- Layer 3: Generate and micro-simulate tactical candidates.
 	local candidates = buildCandidates(scratch, team, roles, baseMoves, weights)
 	local simTicks = math.clamp(math.floor(weights.simTicks or 85), 30, 180)
-
 	local bestMoves = baseMoves
 	local bestScore = -math.huge
+	local scoredGoal = false
 
 	for _, cand in ipairs(candidates) do
-		cloneIntoScratch(round, scratch, chosenPower)
+		cloneIntoScratch(round, scratch, candidatePower)
 		local launchMap = {}
 		for id, mv in pairs(cand.moves) do
 			launchMap[id] = mv
@@ -966,8 +974,47 @@ function BotBrain.planTurn(round, team, turnId, difficulty, customWeights)
 		if sc > bestScore then
 			bestScore = sc
 			bestMoves = cand.moves
+			scoredGoal = (scratch.scorer == team)
 		end
 	end
+
+	return bestMoves, bestScore, roles, scoredGoal
+end
+
+function BotBrain.planTurn(round, team, turnId, difficulty, customWeights, matchCtx)
+	local baseWeights = customWeights or BotWeights.get(difficulty)
+	local weights = baseWeights
+	local isGoldenGoal = matchCtx ~= nil and matchCtx.goldenGoal == true
+	if isGoldenGoal then
+		-- Clutch Golden Goal weighting: tighten defense & seize decisive Power Plays
+		weights = table.clone(baseWeights)
+		weights.concedePenalty = (baseWeights.concedePenalty or 600) * 1.45
+		weights.ownGoalPenalty = (baseWeights.ownGoalPenalty or 1200) * 1.4
+		weights.powerAggression = math.min(1.0, (baseWeights.powerAggression or 0.5) * 1.35)
+	end
+	turnId = turnId or 1
+
+	-- Layer 4: Decide candidate Power Play
+	local chosenPower = BotBrain.choosePower(round, team, weights)
+	local scratch = getScratchRound()
+
+	-- Evaluate best move plan with chosenPower
+	local bestMoves, bestScore, roles, scoredGoal = evaluateCandidatePlan(round, scratch, team, turnId, weights, chosenPower)
+
+	-- Smart Power-vs-Hold evaluation (Normal/Pro): don't burn a valuable crate power if holding it is almost as good!
+	if chosenPower ~= nil and chosenPower.kind ~= "steal" and (weights.simCandidates or 8) >= 12 then
+		local holdMoves, holdScore, holdRoles = evaluateCandidatePlan(round, scratch, team, turnId, weights, nil)
+		local minGain = if isGoldenGoal then 4 else 22
+		if not scoredGoal and bestScore < holdScore + minGain then
+			chosenPower = nil
+			bestMoves = holdMoves
+			bestScore = holdScore
+			roles = holdRoles
+		end
+	end
+
+	-- Sync scratch once to winning state for fallback safety checks
+	cloneIntoScratch(round, scratch, chosenPower)
 
 	-- Build dense, sorted, ValidatePlan-safe array of up to 4 moves (applying aimJitter if > 0).
 	local jitter = weights.aimJitter or 0

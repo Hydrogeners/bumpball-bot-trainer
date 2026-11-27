@@ -229,18 +229,35 @@ local function playMatch(weights0, weights1, seed, maxTurns)
 	eval1.simCandidates = math.min(eval1.simCandidates or 12, 10)
 	eval1.simTicks = math.min(eval1.simTicks or 85, 70)
 
-	for turn = 1, (maxTurns or 6) do
+	for turn = 1, (maxTurns or 8) do
 		round:prepareCrates(turn)
-		local p0 = BotBrain.planTurn(round, 0, turn, "Pro", eval0)
-		local p1 = BotBrain.planTurn(round, 1, turn, "Pro", eval1)
-		applyBotPower(round, 0, p0.power)
-		applyBotPower(round, 1, p1.power)
+		local ctx = { goldenGoal = (turn >= (maxTurns or 8)) }
+		-- Alternate which side reacts to an earlier opponent power (mirroring human-like mid-turn reactivity!)
+		local firstTeam = if (turn % 2 == 1) then 0 else 1
+		local secondTeam = 1 - firstTeam
+		local firstWeights = if firstTeam == 0 then eval0 else eval1
+		local secondWeights = if secondTeam == 0 then eval0 else eval1
+
+		local pFirst = BotBrain.planTurn(round, firstTeam, turn, "Pro", firstWeights, ctx)
+		-- Half the time the first player drops power early enough for the second player to react; half the time it's a late buzzer drop!
+		local earlyDrop = (rng:NextInteger(0, 1) == 1)
+		if earlyDrop and pFirst.power then
+			applyBotPower(round, firstTeam, pFirst.power)
+		end
+
+		local pSecond = BotBrain.planTurn(round, secondTeam, turn, "Pro", secondWeights, ctx)
+		if not earlyDrop and pFirst.power then
+			applyBotPower(round, firstTeam, pFirst.power)
+		end
+		if pSecond.power then
+			applyBotPower(round, secondTeam, pSecond.power)
+		end
 
 		local combined = {}
-		for _, mv in ipairs(p0.moves) do
+		for _, mv in ipairs(pFirst.moves) do
 			combined[mv.id] = mv
 		end
-		for _, mv in ipairs(p1.moves) do
+		for _, mv in ipairs(pSecond.moves) do
 			combined[mv.id] = mv
 		end
 		if round:launchMoves(combined, false) then
@@ -256,7 +273,7 @@ local function playMatch(weights0, weights1, seed, maxTurns)
 		end
 	end
 	-- Draw: slight territorial tiebreak based on final ball X
-	return nil, maxTurns or 6, round.ball.position.X
+	return nil, maxTurns or 8, round.ball.position.X
 end
 
 local function evaluateChallenger(challenger, opponents, matchPairs, rng)
